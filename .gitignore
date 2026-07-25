@@ -1,0 +1,14 @@
+# dependencies of the dev/verification harness
+dev/node_modules/
+
+# generated build artifacts (recreate with the dev/build_*.mjs scripts)
+dev/*.b64
+dev/demo.json
+dev/shooter.json
+dev/standalone_game.html
+
+# screenshots produced by the verification harness
+dev/shot-*.png
+
+# local tooling state
+.playwright-mcp/
