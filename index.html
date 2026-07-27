@@ -1623,25 +1623,29 @@ class Input {
     this.mPressed = new Uint8Array(3);
     this.mPending = new Uint8Array(3);
   }
-  applyDown(btn) { // recompute the merged state; edge on the merge, not the source
-    const eff = (this.keyDown[btn] || this.padDown[btn] || this.touchDown[btn]) ? 1 : 0;
-    if (eff && !this.down[btn]) this.pending[btn] = 1;
-    this.down[btn] = eff;
+  refreshDown(btn) { // held state is the OR of all sources
+    this.down[btn] = (this.keyDown[btn] || this.padDown[btn] || this.touchDown[btn]) ? 1 : 0;
   }
+  // Press edges are PER SOURCE: each device's own 0->1 transition counts.
+  // If one source ever gets stuck down (a lost keyup/pointerup), the other
+  // devices keep producing presses instead of being locked out forever.
   setKey(btn, isDown) {
     if (btn < 0 || btn >= TOTAL_BTN) return;
+    if (isDown && !this.keyDown[btn]) this.pending[btn] = 1;
     this.keyDown[btn] = isDown ? 1 : 0;
-    this.applyDown(btn);
+    this.refreshDown(btn);
   }
   setPad(btn, isDown) {
     if (btn < 0 || btn >= TOTAL_BTN) return;
+    if (isDown && !this.padDown[btn]) this.pending[btn] = 1;
     this.padDown[btn] = isDown ? 1 : 0;
-    this.applyDown(btn);
+    this.refreshDown(btn);
   }
   setTouch(btn, isDown) {
     if (btn < 0 || btn >= TOTAL_BTN) return;
+    if (isDown && !this.touchDown[btn]) this.pending[btn] = 1;
     this.touchDown[btn] = isDown ? 1 : 0;
-    this.applyDown(btn);
+    this.refreshDown(btn);
   }
   setMousePos(x, y) { this.mx = x; this.my = y; }
   setMouseBtn(b, isDown) {
@@ -5753,28 +5757,42 @@ SelfTest.test("two-player input: btn(i, p) reads buttons 6-11", t => {
   t.assertEq(btnFromEvent({ code: "KeyQ", key: "q" }), 10, "Q maps to P2 O");
   t.assertEq(btnFromEvent({ code: "KeyE", key: "e" }), 8, "E maps to P2 up");
 });
-SelfTest.test("input merges keyboard and gamepad layers", t => {
+SelfTest.test("input merges sources; presses edge per device", t => {
   const inp = new Input();
   inp.setKey(4, true);
-  inp.setPad(4, true);
   inp.beginFrame();
-  t.assertEq(inp.btnp(4), true, "first press edges once");
-  inp.setPad(4, false);     // pad releases, key still holds
+  t.assertEq(inp.btnp(4), true, "key press edges");
+  inp.setKey(4, true); // key repeat: same source stays down, no new edge
   inp.beginFrame();
-  t.assertEq(inp.btn(4), true, "keyboard hold survives pad release");
-  t.assertEq(inp.btnp(4), false, "no ghost re-press");
-  inp.setKey(4, false);
+  t.assertEq(inp.btn(4), true);
+  t.assertEq(inp.btnp(4), false, "held key does not re-edge");
+  inp.setPad(4, true); // a DIFFERENT device pressing is a real press
   inp.beginFrame();
-  t.assertEq(inp.btn(4), false, "released when both sources are up");
-  inp.setPad(4, true);      // pad alone presses again
-  inp.beginFrame();
-  t.assertEq(inp.btnp(4), true, "pad can edge on its own");
-  inp.setTouch(4, true);    // touch is a third independent source
+  t.assertEq(inp.btnp(4), true, "pad press edges even while key held");
   inp.setPad(4, false);
   inp.beginFrame();
-  t.assertEq(inp.btn(4), true, "touch hold survives pad release");
-  t.assertEq(inp.btnp(4), false, "no ghost edge when sources swap");
+  t.assertEq(inp.btn(4), true, "keyboard hold survives pad release");
+  inp.setKey(4, false);
+  inp.beginFrame();
+  t.assertEq(inp.btn(4), false, "released when all sources are up");
   inp.reset();
+  t.assertEq(inp.btn(4), false);
+});
+SelfTest.test("a stuck source can never block other devices' presses", t => {
+  const inp = new Input();
+  inp.setTouch(4, true); // pointerup was lost: touch layer stuck down forever
+  inp.beginFrame();
+  t.assertEq(inp.btnp(4), true);
+  for (let i = 0; i < 3; i++) { // keyboard keeps working regardless
+    inp.setKey(4, true);
+    inp.beginFrame();
+    t.assertEq(inp.btnp(4), true, "keyboard press " + (i + 1) + " edges despite stuck touch");
+    inp.setKey(4, false);
+    inp.beginFrame();
+  }
+  t.assertEq(inp.btn(4), true, "held state still honors the stuck source");
+  inp.setTouch(4, false);
+  inp.beginFrame();
   t.assertEq(inp.btn(4), false);
 });
 SelfTest.test("devkit mouse: position + button latching via the api", t => {
@@ -6713,9 +6731,20 @@ const TouchPad = (() => {
   const wrap = el("touch-pad");
   const dpad = el("tp-dpad");
   let enabled = false;
+  let wasVisible = false;
   function refresh() {
-    wrap.classList.toggle("visible",
-      enabled && runtime.running && UI.current === "run" && !PauseMenu.open);
+    const visible = enabled && runtime.running && UI.current === "run" && !PauseMenu.open;
+    wrap.classList.toggle("visible", visible);
+    if (wasVisible && !visible) releaseAll(); // never leave buttons latched
+    wasVisible = visible;
+  }
+  function releaseAll() {
+    clearDpad();
+    dpadPointer = null;
+    for (const [id, btn] of [["tp-o", 4], ["tp-x", 5]]) {
+      el(id).classList.remove("held");
+      input.setTouch(btn, false);
+    }
   }
   function enable() { enabled = true; refresh(); }
   window.addEventListener("touchstart", enable, { once: true, passive: true });
@@ -6758,6 +6787,7 @@ const TouchPad = (() => {
   };
   dpad.addEventListener("pointerup", dpadUp);
   dpad.addEventListener("pointercancel", dpadUp);
+  dpad.addEventListener("lostpointercapture", () => { dpadPointer = null; clearDpad(); });
   for (const [id, btn] of [["tp-o", 4], ["tp-x", 5]]) {
     const bEl = el(id);
     bEl.addEventListener("pointerdown", e => {
@@ -6772,6 +6802,7 @@ const TouchPad = (() => {
     };
     bEl.addEventListener("pointerup", up);
     bEl.addEventListener("pointercancel", up);
+    bEl.addEventListener("lostpointercapture", up);
   }
   el("tp-pause").addEventListener("pointerdown", e => {
     e.preventDefault();
