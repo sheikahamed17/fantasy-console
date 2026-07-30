@@ -7206,7 +7206,15 @@ window.addEventListener("keydown", e => {
       !e.ctrlKey && !e.metaKey && !e.altKey) { // browser shortcuts stay browser shortcuts
     if (PauseMenu.open) { PauseMenu.key(e); return; }
     const b = btnFromEvent(e);
-    if (b !== undefined) { input.setKey(b, true); e.preventDefault(); return; }
+    if (b !== undefined) {
+      // e.repeat === false means a genuine new physical press. If our key
+      // layer still thinks the key is down, its keyup was lost (Space is
+      // notorious for this) — release first so the press edges properly.
+      if (!e.repeat && input.keyDown[b]) input.setKey(b, false);
+      input.setKey(b, true);
+      e.preventDefault();
+      return;
+    }
     if (e.code === "Escape") {
       // player builds have no editor to fall back to: Esc pauses instead
       if (playerModeActive()) PauseMenu.show(); else stopCart(true);
@@ -7221,6 +7229,9 @@ window.addEventListener("keyup", e => {
   if (b !== undefined) input.setKey(b, false);
 });
 window.addEventListener("blur", () => input.reset());
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) input.reset(); // tab switches can swallow keyups too
+});
 
 // The run view must never LOOK playable while nothing is running:
 // activating the RUN tab (or clicking the screen) starts the cart.
